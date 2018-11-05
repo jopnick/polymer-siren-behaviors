@@ -105,14 +105,19 @@
 						tokenValue: tokenValue
 					};
 				}
-
-				const decoded = JSON.parse(atob(tokenParts[1]).toString());
+				let parsed;
+				try {
+				 let decoded = atob(tokenParts[1]);
+				 parsed = JSON.parse(decoded);
+			 } catch (err) {
+				 debugger;
+			 }
 
 				const volatileClaims = ['exp', 'iat', 'jti', 'nbf'];
-				const normalizedClaims = Object.keys(decoded)
+				const normalizedClaims = Object.keys(parsed)
 					.filter(function (val) { return volatileClaims.indexOf(val) === -1 })
 					.reduce(function (result, key) {
-						result[key] = decoded[key]
+						result[key] = parsed[key]
 						return result;
 					}, {});
 
@@ -154,10 +159,11 @@
 						headers: headers
 					})
 						.then(function(response) {
-							if (response.ok) {
+							var linkHeader = response.headers ? response.headers.get('Link') : null;
+							if (!linkHeader) {
 								return response.json();
 							}
-							return Promise.reject(response.status);
+							return this._handleCachePriming(entityId, token, response, linkHeader);
 						}.bind(this))
 						.then(function(body) {
 							const entity = window.D2L.Hypermedia.Siren.Parse(body);
@@ -213,15 +219,17 @@
 				this._initContainer(this._store, lowerCaseEntityId, cacheKey);
 
 				const entities = this.expand(entityId, entity);
-				entities.forEach(function(entity) {
-					this._store.get(cacheKey).set(entity.key.toLowerCase(), {
+				entities.forEach(function(item) {
+					this._store.get(cacheKey).set(item.key.toLowerCase(), {
 						status: '',
-						entity: entity.value,
+						entity: item.value,
 						request: null
 					});
-					this._notify(entity.key, cacheKey, entity.value);
 				}.bind(this));
-
+				//notify only after the caches are primed
+				entities.forEach(function(item) {
+					this._notify(item.key, cacheKey, item.value);
+				}.bind(this))
 				return entity;
 			}.bind(this));
 		},
@@ -286,7 +294,63 @@
 				this._initContainer(this._listeners, entityId, cacheKey, new Set()).delete(listener);
 			}.bind(this));
 		},
-
+		_handleCachePriming: function (href, token, response, linkHeader) {
+			var cachePrimers = window.D2L.Siren.EntityStore
+				.parseLinkHeader(linkHeader)
+				.filter(function(link) {
+					return link.rel.indexOf('https://api.brightspace.com/rels/cache-primer') !== -1;
+				});
+			if (cachePrimers.length !== 1) {
+				return response.json();
+			}
+			var self = this;
+			return this._getToken(token).then(function(resolved){
+				var cacheKey = resolved.cacheKey;
+				return new Promise(function(resolve) {
+					var headers = new Headers();
+					var cachePrimerHref = cachePrimers[0].href;
+					resolved.tokenValue && headers.set('Authorization', 'Bearer ' + resolved.tokenValue)
+						  && headers.set('pragma', 'no-cache')
+						  && headers.set('cache-control', 'no-cache');
+					window.d2lfetch.fetch(cachePrimerHref, {
+						headers: headers
+					})
+					.then(function(cacheResponse){
+						if (!cacheResponse.ok) {
+							throw new Error("exit and proceed");
+						}
+						return cacheResponse.json();
+					})
+					.then(function(data){
+						var entity = window.D2L.Hypermedia.Siren.Parse(data);
+						//prime up that cache
+						const subEntities = entity.getSubEntitiesByRel('canonical');
+						for( var subEntity of subEntities) {
+							const subEntityId = subEntity.getLinkByRel && subEntity.getLinkByRel('self') && subEntity.getLinkByRel('self').href || '';
+							// don't process if this is the entity we are about to prime, or if it has no self-link
+							if( subEntityId === '' || subEntityId === href) {
+								continue;
+							}
+							const key = subEntityId.toLowerCase();
+							// since its canonical, we'll remove the context in which we found it,
+							// cache it as _the_ entity for this href
+							delete subEntity.rel;
+							self._initContainer(self._store, key, cacheKey);
+							self._store.get(cacheKey).set(key, {
+								status: '',
+								entity: subEntity,
+								request: null
+							});
+						}
+						return resolve(response.json());
+					})
+					.catch(function(err){
+					//if it fails.. meh, just go on
+						return resolve(response.json())
+					});
+				});
+			});
+		},
 		_notify: function(entityId, cacheKey, entity) {
 			const listenerSet = this._initContainer(this._listeners, entityId, cacheKey, new Set());
 			listenerSet.forEach(function(listener) {
