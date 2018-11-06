@@ -159,15 +159,16 @@
 						headers: headers
 					})
 						.then(function(response) {
-							var linkHeader = response.headers ? response.headers.get('Link') : null;
-							if (!linkHeader) {
-								return response.json();
+							if (!response.ok) {
+								return Promise.reject(reponse.status);
 							}
-							return this._handleCachePriming(entityId, token, response, linkHeader);
+							return this._handleCachePriming(entityId, token, response);
 						}.bind(this))
-						.then(function(body) {
-							const entity = window.D2L.Hypermedia.Siren.Parse(body);
-							this.update(entityId, resolved, entity);
+						.then(window.D2L.Hypermedia.Siren.Parse)
+						.then(function(entity){
+							return this.update(entityId, token, entity);
+						}.bind(this))
+						.then(function(entity){
 							if (bypassCache) {
 								this._invalidationListeners.forEach(function(listener) {
 									listener(entityId, cacheKey, entity);
@@ -294,7 +295,11 @@
 				this._initContainer(this._listeners, entityId, cacheKey, new Set()).delete(listener);
 			}.bind(this));
 		},
-		_handleCachePriming: function (href, token, response, linkHeader) {
+		_handleCachePriming: function (href, token, response) {
+			var linkHeader = response.headers ? response.headers.get('Link') : null;
+			if (!linkHeader) {
+				return response.json();
+			}
 			var cachePrimers = window.D2L.Siren.EntityStore
 				.parseLinkHeader(linkHeader)
 				.filter(function(link) {
@@ -320,11 +325,11 @@
 							throw new Error("exit and proceed");
 						}
 						return cacheResponse.json();
-					})
+					}.bind(this))
 					.then(function(data){
 						var entity = window.D2L.Hypermedia.Siren.Parse(data);
 						//prime up that cache
-						const subEntities = entity.getSubEntitiesByRel('canonical');
+						const subEntities = entity.getSubEntitiesByRel('https://api.brightspace.com/rels/cache-primer');
 						for( var subEntity of subEntities) {
 							const subEntityId = subEntity.getLinkByRel && subEntity.getLinkByRel('self') && subEntity.getLinkByRel('self').href || '';
 							// don't process if this is the entity we are about to prime, or if it has no self-link
@@ -335,21 +340,21 @@
 							// since its canonical, we'll remove the context in which we found it,
 							// cache it as _the_ entity for this href
 							delete subEntity.rel;
-							self._initContainer(self._store, key, cacheKey);
-							self._store.get(cacheKey).set(key, {
+							this._initContainer(this._store, key, cacheKey);
+							this._store.get(cacheKey).set(key, {
 								status: '',
 								entity: subEntity,
 								request: null
 							});
 						}
 						return resolve(response.json());
-					})
+					}.bind(this))
 					.catch(function(err){
 					//if it fails.. meh, just go on
 						return resolve(response.json())
 					});
-				});
-			});
+				}.bind(this));
+			}.bind(this));
 		},
 		_notify: function(entityId, cacheKey, entity) {
 			const listenerSet = this._initContainer(this._listeners, entityId, cacheKey, new Set());
